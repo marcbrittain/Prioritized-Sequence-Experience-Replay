@@ -12,10 +12,16 @@ python -um dopamine.discrete_domains.train \
 Support is also available for a Rainbow agent. There is a rainbow_pser.gin file that contains a template for set up. 
 
 
-If this work helped in your work or research please cite the work below:
+## Giving Credit
+If this work helped in your work or research please cite the [paper](https://arxiv.org/abs/1905.12726) (here is an example bibtex):
 
 ```
-Brittain, M., Bertram, J., Yang, X., & Wei, P. (2019). Prioritized Sequence Experience Replay. arXiv preprint arXiv:1905.12726.
+@article{brittain2019prioritized,
+  title={Prioritized Sequence Experience Replay},
+  author={Brittain, Marc and Bertram, Josh and Yang, Xuxi and Wei, Peng},
+  journal={arXiv preprint arXiv:1905.12726},
+  year={2019}
+}
 ```
 
 
