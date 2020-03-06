@@ -18,6 +18,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import collections
 import math
 import os
 import random
@@ -26,17 +27,21 @@ import random
 
 from dopamine.discrete_domains import atari_lib
 from dopamine.replay_memory import circular_replay_buffer
+from dopamine.replay_memory import prioritized_replay_buffer
+
 import numpy as np
-import tensorflow.compat.v1 as tf
+import tensorflow as tf
 
 import gin.tf
+
+slim = tf.contrib.slim
 
 
 # These are aliases which are used by other classes.
 NATURE_DQN_OBSERVATION_SHAPE = atari_lib.NATURE_DQN_OBSERVATION_SHAPE
 NATURE_DQN_DTYPE = atari_lib.NATURE_DQN_DTYPE
 NATURE_DQN_STACK_SIZE = atari_lib.NATURE_DQN_STACK_SIZE
-nature_dqn_network = atari_lib.NatureDQNNetwork
+nature_dqn_network = atari_lib.nature_dqn_network
 
 
 @gin.configurable
@@ -80,8 +85,10 @@ class DQNAgent(object):
                observation_shape=atari_lib.NATURE_DQN_OBSERVATION_SHAPE,
                observation_dtype=atari_lib.NATURE_DQN_DTYPE,
                stack_size=atari_lib.NATURE_DQN_STACK_SIZE,
-               network=atari_lib.NatureDQNNetwork,
+               network=atari_lib.nature_dqn_network,
                gamma=0.99,
+               eta=0.3,
+               add_w_online=False,
                update_horizon=1,
                min_replay_history=20000,
                update_period=4,
@@ -91,7 +98,6 @@ class DQNAgent(object):
                epsilon_eval=0.001,
                epsilon_decay_period=250000,
                tf_device='/cpu:*',
-               eval_mode=False,
                use_staging=True,
                max_tf_checkpoints_to_keep=4,
                optimizer=tf.train.RMSPropOptimizer(
@@ -102,7 +108,7 @@ class DQNAgent(object):
                    centered=True),
                summary_writer=None,
                summary_writing_frequency=500,
-               allow_partial_reload=False):
+               replay_scheme='uniform'):
     """Initializes the agent and constructs the components of its graph.
 
     Args:
@@ -112,11 +118,11 @@ class DQNAgent(object):
       observation_dtype: tf.DType, specifies the type of the observations. Note
         that if your inputs are continuous, you should set this to tf.float32.
       stack_size: int, number of frames to use in state stack.
-      network: tf.Keras.Model, expecting 2 parameters: num_actions,
-        network_type. A call to this object will return an instantiation of the
-        network provided. The network returned can be run with different inputs
-        to create different outputs. See
-        dopamine.discrete_domains.atari_lib.NatureDQNNetwork as an example.
+      network: function expecting three parameters:
+        (num_actions, network_type, state). This function will return the
+        network_type object containing the tensors output by the network.
+        See dopamine.discrete_domains.atari_lib.nature_dqn_network as
+        an example.
       gamma: float, discount factor with the usual RL meaning.
       update_horizon: int, horizon at which updates are performed, the 'n' in
         n-step update.
@@ -132,7 +138,6 @@ class DQNAgent(object):
       epsilon_eval: float, epsilon used when evaluating the agent.
       epsilon_decay_period: int, length of the epsilon decay schedule.
       tf_device: str, Tensorflow device on which the agent's graph is executed.
-      eval_mode: bool, True for evaluation and False for training.
       use_staging: bool, when True use a staging area to prefetch the next
         training batch, speeding training up by about 30%.
       max_tf_checkpoints_to_keep: int, the number of TensorFlow checkpoints to
@@ -142,8 +147,6 @@ class DQNAgent(object):
         Summary writing disabled if set to None.
       summary_writing_frequency: int, frequency with which summaries will be
         written. Lower values will result in slower training.
-      allow_partial_reload: bool, whether we allow reloading a partial agent
-        (for instance, only the network parameters).
     """
     assert isinstance(observation_shape, tuple)
     tf.logging.info('Creating %s agent with the following parameters:',
@@ -159,8 +162,13 @@ class DQNAgent(object):
     tf.logging.info('\t tf_device: %s', tf_device)
     tf.logging.info('\t use_staging: %s', use_staging)
     tf.logging.info('\t optimizer: %s', optimizer)
-    tf.logging.info('\t max_tf_checkpoints_to_keep: %d',
-                    max_tf_checkpoints_to_keep)
+    tf.logging.info('\t replay scheme: %s', replay_scheme)
+    tf.logging.info('\t add with td error: %s', add_w_online)
+
+
+    ## to do add eta to the log
+
+
 
     self.num_actions = num_actions
     self.observation_shape = tuple(observation_shape)
@@ -168,6 +176,7 @@ class DQNAgent(object):
     self.stack_size = stack_size
     self.network = network
     self.gamma = gamma
+    self.eta = eta
     self.update_horizon = update_horizon
     self.cumulative_gamma = math.pow(gamma, update_horizon)
     self.min_replay_history = min_replay_history
@@ -177,12 +186,13 @@ class DQNAgent(object):
     self.epsilon_eval = epsilon_eval
     self.epsilon_decay_period = epsilon_decay_period
     self.update_period = update_period
-    self.eval_mode = eval_mode
+    self.eval_mode = False
     self.training_steps = 0
     self.optimizer = optimizer
     self.summary_writer = summary_writer
     self.summary_writing_frequency = summary_writing_frequency
-    self.allow_partial_reload = allow_partial_reload
+    self._replay_scheme = replay_scheme
+    self.add_w_online = add_w_online
 
     with tf.device(tf_device):
       # Create a placeholder for the state input to the DQN network.
@@ -191,6 +201,15 @@ class DQNAgent(object):
       self.state = np.zeros(state_shape)
       self.state_ph = tf.placeholder(self.observation_dtype, state_shape,
                                      name='state_ph')
+
+      if self.add_w_online:
+          self._td_state = tf.placeholder(tf.uint8, state_shape, name='state_td')
+          self._td_next_state = tf.placeholder(tf.uint8, state_shape, name='next_state_td')
+          self._td_batch =1
+          self._td_reward = tf.placeholder(tf.float32, (1,), name='tf_reward')
+          self._td_terminal = tf.placeholder(tf.int32, (1,), name='tf_terminal')
+          self._td_action = tf.placeholder(tf.int32, (1,), name='tf_action')
+
       self._replay = self._build_replay_buffer(use_staging)
 
       self._build_networks()
@@ -198,31 +217,39 @@ class DQNAgent(object):
       self._train_op = self._build_train_op()
       self._sync_qt_ops = self._build_sync_op()
 
+      if self.add_w_online:
+          self._td_op = self._build_td_op()
+
+
     if self.summary_writer is not None:
       # All tf.summaries should have been defined prior to running this.
       self._merged_summaries = tf.summary.merge_all()
     self._sess = sess
-
-    var_map = atari_lib.maybe_transform_variable_names(tf.all_variables())
-    self._saver = tf.train.Saver(var_list=var_map,
-                                 max_to_keep=max_tf_checkpoints_to_keep)
+    self._saver = tf.train.Saver(max_to_keep=max_tf_checkpoints_to_keep)
 
     # Variables to be initialized by the agent once it interacts with the
     # environment.
     self._observation = None
     self._last_observation = None
 
-  def _create_network(self, name):
+  def _get_network_type(self):
+    """Returns the type of the outputs of a Q value network.
+
+    Returns:
+      net_type: _network_type object defining the outputs of the network.
+    """
+    return collections.namedtuple('DQN_network', ['q_values'])
+
+  def _network_template(self, state):
     """Builds the convolutional network used to compute the agent's Q-values.
 
     Args:
-      name: str, this name is passed to the tf.keras.Model and used to create
-        variable scope under the hood by the tf.keras.Model.
+      state: `tf.Tensor`, contains the agent's current state.
+
     Returns:
-      network: tf.keras.Model, the network instantiated by the Keras model.
+      net: _network_type object containing the tensors output by the network.
     """
-    network = self.network(self.num_actions, name=name)
-    return network
+    return self.network(self.num_actions, self._get_network_type(), state)
 
   def _build_networks(self):
     """Builds the Q-value network computations needed for acting and training.
@@ -236,20 +263,26 @@ class DQNAgent(object):
       self._replay_next_target_net_outputs: The replayed next states' target
         Q-values (see Mnih et al., 2015 for details).
     """
-
-    # _network_template instantiates the model and returns the network object.
-    # The network object can be used to generate different outputs in the graph.
-    # At each call to the network, the parameters will be reused.
-    self.online_convnet = self._create_network(name='Online')
-    self.target_convnet = self._create_network(name='Target')
+    # Calling online_convnet will generate a new graph as defined in
+    # self._get_network_template using whatever input is passed, but will always
+    # share the same weights.
+    self.online_convnet = tf.make_template('Online', self._network_template)
+    self.target_convnet = tf.make_template('Target', self._network_template)
     self._net_outputs = self.online_convnet(self.state_ph)
+    #self._target_net_outputs = self.target_convnet(self.state_ph)
     # TODO(bellemare): Ties should be broken. They are unlikely to happen when
     # using a deep network, but may affect performance with a linear
     # approximation scheme.
     self._q_argmax = tf.argmax(self._net_outputs.q_values, axis=1)[0]
+
     self._replay_net_outputs = self.online_convnet(self._replay.states)
     self._replay_next_target_net_outputs = self.target_convnet(
         self._replay.next_states)
+
+    if self.add_w_online:
+        self._net_outputs_td = self.online_convnet(self._td_state)
+        self._next_target_net_outputs_td = self.target_convnet(
+            self._td_next_state)
 
   def _build_replay_buffer(self, use_staging):
     """Creates the replay buffer used by the agent.
@@ -261,13 +294,24 @@ class DQNAgent(object):
     Returns:
       A WrapperReplayBuffer object.
     """
-    return circular_replay_buffer.WrappedReplayBuffer(
+
+    if self._replay_scheme == 'uniform':
+        return circular_replay_buffer.WrappedReplayBuffer(
         observation_shape=self.observation_shape,
         stack_size=self.stack_size,
         use_staging=use_staging,
         update_horizon=self.update_horizon,
         gamma=self.gamma,
         observation_dtype=self.observation_dtype.as_numpy_dtype)
+
+    if self._replay_scheme == 'prioritized':
+
+        return prioritized_replay_buffer.WrappedPrioritizedReplayBuffer(
+            observation_shape=self.observation_shape,
+            stack_size=self.stack_size,
+            use_staging=use_staging,
+            update_horizon=self.update_horizon,
+            gamma=self.gamma)
 
   def _build_target_q_op(self):
     """Build an op used as a target for the Q-value.
@@ -288,6 +332,36 @@ class DQNAgent(object):
     return self._replay.rewards + self.cumulative_gamma * replay_next_qt_max * (
         1. - tf.cast(self._replay.terminals, tf.float32))
 
+
+  def _build_td_op(self):
+    replay_action_one_hot = tf.one_hot(
+        self._td_action, self.num_actions, 1., 0., name='action_one_hot')
+    replay_chosen_q = tf.reduce_sum(
+        self._net_outputs_td.q_values * replay_action_one_hot,
+        reduction_indices=1,
+        name='replay_chosen_q')
+
+    replay_next_qt_max = tf.reduce_max(
+        self._next_target_net_outputs_td.q_values, 1)
+    # Calculate the Bellman target value.
+    #   Q_t = R_t + \gamma^N * Q'_t+1
+    # where,
+    #   Q'_t+1 = \argmax_a Q(S_t+1, a)
+    #          (or) 0 if S_t is a terminal state,
+    # and
+    #   N is the update horizon (by default, N=1).
+    holder = self._td_reward + self.cumulative_gamma * replay_next_qt_max * (
+        1. - tf.cast(self._td_terminal, tf.float32))
+
+    target = tf.stop_gradient(holder)
+    loss = tf.sqrt(tf.losses.huber_loss(
+        target, replay_chosen_q, reduction=tf.losses.Reduction.NONE)+ 1e-10)
+
+
+    return loss
+
+
+
   def _build_train_op(self):
     """Builds a training op.
 
@@ -304,10 +378,44 @@ class DQNAgent(object):
     target = tf.stop_gradient(self._build_target_q_op())
     loss = tf.losses.huber_loss(
         target, replay_chosen_q, reduction=tf.losses.Reduction.NONE)
-    if self.summary_writer is not None:
-      with tf.variable_scope('Losses'):
-        tf.summary.scalar('HuberLoss', tf.reduce_mean(loss))
-    return self.optimizer.minimize(tf.reduce_mean(loss))
+
+    if self._replay_scheme == 'prioritized':
+        probs = self._replay.transition['sampling_probabilities']
+        loss_weights = 1.0 / tf.sqrt(probs + 1e-10)
+        loss_weights /= tf.reduce_max(loss_weights)
+
+        # Rainbow and prioritized replay are parametrized by an exponent alpha,
+        # but in both cases it is set to 0.5 - for simplicity's sake we leave it
+        # as is here, using the more direct tf.sqrt(). Taking the square root
+        # "makes sense", as we are dealing with a squared loss.
+        # Add a small nonzero value to the loss to avoid 0 priority items. While
+        # technically this may be okay, setting all items to 0 priority will cause
+        # troubles, and also result in 1.0 / 0.0 = NaN correction terms.
+        if self.eta == 'default':
+           update_priorities_op = self._replay.tf_set_priority(
+             self._replay.indices, tf.sqrt(loss + 1e-10))
+        else:
+           update_priorities_op = self._replay.tf_set_priority(
+             self._replay.indices, tf.math.maximum(tf.sqrt(loss + 1e-10),self.eta*probs))
+
+        # Weight the loss by the inverse priorities.
+        loss = loss_weights * loss
+
+
+        with tf.control_dependencies([update_priorities_op]):
+            if self.summary_writer is not None:
+                with tf.variable_scope('Losses'):
+                    tf.summary.scalar('HuberLoss', tf.reduce_mean(loss))
+          # Schaul et al. reports a slightly different rule, where 1/N is also
+          # exponentiated by beta. Not doing so seems more reasonable, and did not
+          # impact performance in our experiments.
+            return self.optimizer.minimize(tf.reduce_mean(loss))
+
+    else:
+        if self.summary_writer is not None:
+            with tf.variable_scope('Losses'):
+                tf.summary.scalar('HuberLoss', tf.reduce_mean(loss))
+        return self.optimizer.minimize(tf.reduce_mean(loss))
 
   def _build_sync_op(self):
     """Builds ops for assigning weights from online to target network.
@@ -317,12 +425,10 @@ class DQNAgent(object):
     """
     # Get trainable variables from online and target DQNs
     sync_qt_ops = []
-    scope = tf.get_default_graph().get_name_scope()
     trainables_online = tf.get_collection(
-        tf.GraphKeys.TRAINABLE_VARIABLES, scope=os.path.join(scope, 'Online'))
+        tf.GraphKeys.TRAINABLE_VARIABLES, scope='Online')
     trainables_target = tf.get_collection(
-        tf.GraphKeys.TRAINABLE_VARIABLES, scope=os.path.join(scope, 'Target'))
-
+        tf.GraphKeys.TRAINABLE_VARIABLES, scope='Target')
     for (w_online, w_target) in zip(trainables_online, trainables_target):
       # Assign weights from online to target network.
       sync_qt_ops.append(w_target.assign(w_online, use_locking=True))
@@ -360,10 +466,19 @@ class DQNAgent(object):
       int, the selected action.
     """
     self._last_observation = self._observation
+    self._last_state = self.state
     self._record_observation(observation)
+    self._current_state = self.state
 
     if not self.eval_mode:
-      self._store_transition(self._last_observation, self.action, reward, False)
+      prio = None
+      if self.add_w_online:
+          prio = self._sess.run(self._td_op,{self._td_state:self._last_state,self._td_action:[self.action],
+                                self._td_next_state:self._current_state,
+                                self._td_reward:[reward],self._td_terminal:[False]})[0]
+
+
+      self._store_transition(self._last_observation, self.action, reward, False,prio)
       self._train_step()
 
     self.action = self._select_action()
@@ -379,7 +494,17 @@ class DQNAgent(object):
       reward: float, the last reward from the environment.
     """
     if not self.eval_mode:
-      self._store_transition(self._observation, self.action, reward, True)
+      prio = None
+      if self.add_w_online:
+          try:
+              prio = self._sess.run(self._td_op,{self._td_state:self._current_state,self._td_action:[self.action],
+                                    self._td_next_state:self._current_state,
+                                    self._td_reward:[reward],self._td_terminal:[True]})[0]
+          except:
+              prio = self._sess.run(self._td_op,{self._td_state:self.state,self._td_action:[self.action],
+                                    self._td_next_state:self.state,
+                                    self._td_reward:[reward],self._td_terminal:[True]})[0]
+      self._store_transition(self._observation, self.action, reward, True,prio)
 
   def _select_action(self):
     """Select an action from the set of available actions.
@@ -447,23 +572,42 @@ class DQNAgent(object):
     self.state = np.roll(self.state, -1, axis=-1)
     self.state[0, ..., -1] = self._observation
 
-  def _store_transition(self, last_observation, action, reward, is_terminal):
-    """Stores an experienced transition.
+  def _store_transition(self,
+                        last_observation,
+                        action,
+                        reward,
+                        is_terminal,
+                        priority=None):
+    """Stores a transition when in training mode.
 
     Executes a tf session and executes replay buffer ops in order to store the
-    following tuple in the replay buffer:
-      (last_observation, action, reward, is_terminal).
-
-    Pedantically speaking, this does not actually store an entire transition
-    since the next state is recorded on the following time step.
+    following tuple in the replay buffer (last_observation, action, reward,
+    is_terminal, priority).
 
     Args:
-      last_observation: numpy array, last observation.
-      action: int, the action taken.
-      reward: float, the reward.
-      is_terminal: bool, indicating if the current state is a terminal state.
+      last_observation: Last observation, type determined via observation_type
+        parameter in the replay_memory constructor.
+      action: An integer, the action taken.
+      reward: A float, the reward.
+      is_terminal: Boolean indicating if the current state is a terminal state.
+      priority: Float. Priority of sampling the transition. If None, the default
+        priority will be used. If replay scheme is uniform, the default priority
+        is 1. If the replay scheme is prioritized, the default priority is the
+        maximum ever seen [Schaul et al., 2015].
     """
-    self._replay.add(last_observation, action, reward, is_terminal)
+
+    if self._replay_scheme == 'prioritized':
+        if priority is None:
+            priority = self._replay.memory.sum_tree.max_recorded_priority
+
+        if not self.eval_mode:
+          self._replay.add(last_observation, action, reward, is_terminal, priority)
+
+    else:
+        if not self.eval_mode:
+
+            self._replay.add(last_observation, action, reward, is_terminal)
+
 
   def _reset_state(self):
     """Resets the agent state by filling it with zeros."""
@@ -496,6 +640,7 @@ class DQNAgent(object):
     self._replay.save(checkpoint_dir, iteration_number)
     bundle_dictionary = {}
     bundle_dictionary['state'] = self.state
+    bundle_dictionary['eval_mode'] = self.eval_mode
     bundle_dictionary['training_steps'] = self.training_steps
     return bundle_dictionary
 
@@ -509,7 +654,7 @@ class DQNAgent(object):
 
     Args:
       checkpoint_dir: str, path to the checkpoint saved by tf.Save.
-      iteration_number: int, checkpoint version, used when restoring the replay
+      iteration_number: int, checkpoint version, used when restoring replay
         buffer.
       bundle_dictionary: dict, containing additional Python objects owned by
         the agent.
@@ -519,21 +664,13 @@ class DQNAgent(object):
     """
     try:
       # self._replay.load() will throw a NotFoundError if it does not find all
-      # the necessary files.
+      # the necessary files, in which case we abort the process & return False.
       self._replay.load(checkpoint_dir, iteration_number)
     except tf.errors.NotFoundError:
-      if not self.allow_partial_reload:
-        # If we don't allow partial reloads, we will return False.
-        return False
-      tf.logging.warning('Unable to reload replay buffer!')
-    if bundle_dictionary is not None:
-      for key in self.__dict__:
-        if key in bundle_dictionary:
-          self.__dict__[key] = bundle_dictionary[key]
-    elif not self.allow_partial_reload:
       return False
-    else:
-      tf.logging.warning("Unable to reload the agent's parameters!")
+    for key in self.__dict__:
+      if key in bundle_dictionary:
+        self.__dict__[key] = bundle_dictionary[key]
     # Restore the agent's TensorFlow graph.
     self._saver.restore(self._sess,
                         os.path.join(checkpoint_dir,

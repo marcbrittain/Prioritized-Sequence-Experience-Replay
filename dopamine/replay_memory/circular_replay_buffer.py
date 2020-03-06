@@ -31,10 +31,9 @@ import os
 import pickle
 
 import numpy as np
-import tensorflow.compat.v1 as tf
+import tensorflow as tf
 
 import gin.tf
-from tensorflow.contrib import staging as contrib_staging
 
 # Defines a type describing part of the tuple returned by the replay
 # memory. Each element of the tuple is a tensor of shape [batch, ...] where
@@ -49,6 +48,19 @@ STORE_FILENAME_PREFIX = '$store$_'
 
 # This constant determines how many iterations a checkpoint is kept for.
 CHECKPOINT_DURATION = 4
+MAX_SAMPLE_ATTEMPTS = 1000
+
+
+
+def get_annealing_rate(start, stop, time):
+  return (stop - start) / time
+
+'''
+ ' Given an annealing rate, a starting point, and a time, get a leanearly
+ ' annealed value.
+'''
+def get_annealed_value(rate, start, time):
+  return rate * time + start
 
 
 def invalid_range(cursor, replay_capacity, stack_size, update_horizon):
@@ -101,12 +113,16 @@ class OutOfGraphReplayBuffer(object):
                stack_size,
                replay_capacity,
                batch_size,
+               decay_scheme,
+               decay_window,
+               decay_gamma,
+               decay_schedule,
+               adaptive,
                update_horizon=1,
                gamma=0.99,
-               max_sample_attempts=1000,
+               max_sample_attempts=MAX_SAMPLE_ATTEMPTS,
                extra_storage_types=None,
                observation_dtype=np.uint8,
-               terminal_dtype=np.uint8,
                action_shape=(),
                action_dtype=np.int32,
                reward_shape=(),
@@ -126,8 +142,6 @@ class OutOfGraphReplayBuffer(object):
         contents that will be stored and returned by sample_transition_batch.
       observation_dtype: np.dtype, type of the observations. Defaults to
         np.uint8 for Atari 2600.
-      terminal_dtype: np.dtype, type of the terminals. Defaults to np.uint8 for
-        Atari 2600.
       action_shape: tuple of ints, the shape for the action vector. Empty tuple
         means the action is a scalar.
       action_dtype: np.dtype, type of elements in the action.
@@ -149,10 +163,14 @@ class OutOfGraphReplayBuffer(object):
         self.__class__.__name__)
     tf.logging.info('\t observation_shape: %s', str(observation_shape))
     tf.logging.info('\t observation_dtype: %s', str(observation_dtype))
-    tf.logging.info('\t terminal_dtype: %s', str(terminal_dtype))
     tf.logging.info('\t stack_size: %d', stack_size)
     tf.logging.info('\t replay_capacity: %d', replay_capacity)
     tf.logging.info('\t batch_size: %d', batch_size)
+    tf.logging.info('\t decay_scheme: %s', decay_scheme)
+    tf.logging.info('\t decay_window: %s', decay_window)
+    tf.logging.info('\t decay_gamma: %s', decay_gamma)
+    tf.logging.info('\t decay_schedule: %s', decay_schedule)
+    tf.logging.info('\t adaptive: %s', adaptive)
     tf.logging.info('\t update_horizon: %d', update_horizon)
     tf.logging.info('\t gamma: %f', gamma)
 
@@ -165,10 +183,14 @@ class OutOfGraphReplayBuffer(object):
     self._state_shape = self._observation_shape + (self._stack_size,)
     self._replay_capacity = replay_capacity
     self._batch_size = batch_size
+    self._decay_scheme = decay_scheme
+    self._decay_window = decay_window
+    self._decay_gamma = decay_gamma
+    self._decay_schedule = decay_schedule
+    self._adaptive = adaptive
     self._update_horizon = update_horizon
     self._gamma = gamma
     self._observation_dtype = observation_dtype
-    self._terminal_dtype = terminal_dtype
     self._max_sample_attempts = max_sample_attempts
     if extra_storage_types:
       self._extra_storage_types = extra_storage_types
@@ -182,6 +204,19 @@ class OutOfGraphReplayBuffer(object):
     self._cumulative_discount_vector = np.array(
         [math.pow(self._gamma, n) for n in range(update_horizon)],
         dtype=np.float32)
+
+
+
+    if self._decay_schedule != 'none':
+        frames = self._decay_schedule
+        self._decay_gamma_init = self._decay_gamma
+        self._decay_gamma_rate     = get_annealing_rate(self._decay_gamma, 0.4, frames)
+
+
+
+
+  def get_per_gamma(self, total_t):
+        return max(get_annealed_value(self._decay_gamma_rate,self._decay_gamma_init , total_t), 0.4)
 
   def _create_storage(self):
     """Creates the numpy arrays used to store transitions.
@@ -216,7 +251,7 @@ class OutOfGraphReplayBuffer(object):
                       self._observation_dtype),
         ReplayElement('action', self._action_shape, self._action_dtype),
         ReplayElement('reward', self._reward_shape, self._reward_dtype),
-        ReplayElement('terminal', (), self._terminal_dtype)
+        ReplayElement('terminal', (), np.uint8)
     ]
 
     for extra_replay_element in self._extra_storage_types:
@@ -247,7 +282,7 @@ class OutOfGraphReplayBuffer(object):
       observation: np.array with shape observation_shape.
       action: int, the action in the transition.
       reward: float, the reward received in the transition.
-      terminal: np.dtype, acts as a boolean indicating whether the transition
+      terminal: A uint8 acting as a boolean indicating whether the transition
                 was terminal (1) or not (0).
       *args: extra contents with shapes and dtypes according to
         extra_storage_types.
@@ -266,39 +301,16 @@ class OutOfGraphReplayBuffer(object):
     Args:
       *args: All the elements in a transition.
     """
-    self._check_args_length(*args)
-    transition = {e.name: args[idx]
-                  for idx, e in enumerate(self.get_add_args_signature())}
-    self._add_transition(transition)
-
-  def _add_transition(self, transition):
-    """Internal add method to add transition dictionary to storage arrays.
-
-    Args:
-      transition: The dictionary of names and values of the transition
-                  to add to the storage.
-    """
     cursor = self.cursor()
-    for arg_name in transition:
-      self._store[arg_name][cursor] = transition[arg_name]
+
+    arg_names = [e.name for e in self.get_add_args_signature()]
+    for arg_name, arg in zip(arg_names, args):
+      self._store[arg_name][cursor] = arg
 
     self.add_count += 1
     self.invalid_range = invalid_range(
         self.cursor(), self._replay_capacity, self._stack_size,
         self._update_horizon)
-
-  def _check_args_length(self, *args):
-    """Check if args passed to the add method have the same length as storage.
-
-    Args:
-      *args: Args for elements used in storage.
-
-    Raises:
-      ValueError: If args have wrong length.
-    """
-    if len(args) != len(self.get_add_args_signature()):
-      raise ValueError('Add expects {} elements, received {}'.format(
-          len(self.get_add_args_signature()), len(args)))
 
   def _check_add_types(self, *args):
     """Checks if args passed to the add method match those of the storage.
@@ -309,7 +321,9 @@ class OutOfGraphReplayBuffer(object):
     Raises:
       ValueError: If args have wrong shape or dtype.
     """
-    self._check_args_length(*args)
+    if len(args) != len(self.get_add_args_signature()):
+      raise ValueError('Add expects {} elements, received {}'.format(
+          len(self.get_add_args_signature()), len(args)))
     for arg_element, store_element in zip(args, self.get_add_args_signature()):
       if isinstance(arg_element, np.ndarray):
         arg_shape = arg_element.shape
@@ -464,11 +478,10 @@ class OutOfGraphReplayBuffer(object):
     attempt_count = 0
     while (len(indices) < batch_size and
            attempt_count < self._max_sample_attempts):
+      attempt_count += 1
       index = np.random.randint(min_id, max_id) % self._replay_capacity
       if self.is_valid_transition(index):
         indices.append(index)
-      else:
-        attempt_count += 1
     if len(indices) != batch_size:
       raise RuntimeError(
           'Max sample attempts: Tried {} times but only sampled {}'
@@ -582,7 +595,7 @@ class OutOfGraphReplayBuffer(object):
                       self._action_dtype),
         ReplayElement('next_reward', (batch_size,) + self._reward_shape,
                       self._reward_dtype),
-        ReplayElement('terminal', (batch_size,), self._terminal_dtype),
+        ReplayElement('terminal', (batch_size,), np.uint8),
         ReplayElement('indices', (batch_size,), np.int32)
     ]
     for element in self._extra_storage_types:
@@ -708,13 +721,17 @@ class WrappedReplayBuffer(object):
                use_staging=True,
                replay_capacity=1000000,
                batch_size=32,
+               decay_scheme='max',
+               decay_window = 20,
+               decay_gamma = 0.8,
+               decay_schedule = 'none',
+               adaptive=False,
                update_horizon=1,
                gamma=0.99,
                wrapped_memory=None,
-               max_sample_attempts=1000,
+               max_sample_attempts=MAX_SAMPLE_ATTEMPTS,
                extra_storage_types=None,
                observation_dtype=np.uint8,
-               terminal_dtype=np.uint8,
                action_shape=(),
                action_dtype=np.int32,
                reward_shape=(),
@@ -738,8 +755,6 @@ class WrappedReplayBuffer(object):
         contents that will be stored and returned by sample_transition_batch.
       observation_dtype: np.dtype, type of the observations. Defaults to
         np.uint8 for Atari 2600.
-      terminal_dtype: np.dtype, type of the terminals. Defaults to np.uint8 for
-        Atari 2600.
       action_shape: tuple of ints, the shape for the action vector. Empty tuple
         means the action is a scalar.
       action_dtype: np.dtype, type of elements in the action.
@@ -771,11 +786,15 @@ class WrappedReplayBuffer(object):
           stack_size,
           replay_capacity,
           batch_size,
+          decay_scheme,
+          decay_window,
+          decay_gamma,
+          decay_schedule,
+          adaptive,
           update_horizon,
           gamma,
           max_sample_attempts,
           observation_dtype=observation_dtype,
-          terminal_dtype=terminal_dtype,
           extra_storage_types=extra_storage_types,
           action_shape=action_shape,
           action_dtype=action_dtype,
@@ -796,7 +815,7 @@ class WrappedReplayBuffer(object):
       observation: np.array with shape observation_shape.
       action: int, the action in the transition.
       reward: float, the reward received in the transition.
-      terminal: np.dtype, acts as a boolean indicating whether the transition
+      terminal: A uint8 acting as a boolean indicating whether the transition
                 was terminal (1) or not (0).
       *args: extra contents with shapes and dtypes according to
         extra_storage_types.
@@ -855,7 +874,7 @@ class WrappedReplayBuffer(object):
     transition_type = self.memory.get_transition_elements()
 
     # Create the staging area in CPU.
-    prefetch_area = contrib_staging.StagingArea(
+    prefetch_area = tf.contrib.staging.StagingArea(
         [shape_with_type.type for shape_with_type in transition_type])
 
     # Store prefetch op for tests, but keep it private -- users should not be

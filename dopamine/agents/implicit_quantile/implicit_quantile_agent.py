@@ -22,13 +22,17 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import collections
+
 
 
 from dopamine.agents.rainbow import rainbow_agent
 from dopamine.discrete_domains import atari_lib
-import tensorflow.compat.v1 as tf
+import tensorflow as tf
 
 import gin.tf
+
+slim = tf.contrib.slim
 
 
 @gin.configurable
@@ -38,7 +42,7 @@ class ImplicitQuantileAgent(rainbow_agent.RainbowAgent):
   def __init__(self,
                sess,
                num_actions,
-               network=atari_lib.ImplicitQuantileNetwork,
+               network=atari_lib.implicit_quantile_network,
                kappa=1.0,
                num_tau_samples=32,
                num_tau_prime_samples=32,
@@ -55,11 +59,11 @@ class ImplicitQuantileAgent(rainbow_agent.RainbowAgent):
     Args:
       sess: `tf.Session` object for running associated ops.
       num_actions: int, number of actions the agent can take at any state.
-      network: tf.Keras.Model, expects three parameters:
-        (num_actions, quantile_embedding_dim, network_type). This class is used
-        to generate network instances that are used by the agent. Each
-        instantiation would have different set of variables. See
-        dopamine.discrete_domains.atari_lib.NatureDQNNetwork as an example.
+      network: function expecting three parameters:
+        (num_actions, network_type, state). This function will return the
+        network_type object containing the tensors output by the network.
+        See dopamine.discrete_domains.atari_lib.nature_dqn_network as
+        an example.
       kappa: float, Huber loss cutoff.
       num_tau_samples: int, number of online quantile samples for loss
         estimation.
@@ -94,18 +98,29 @@ class ImplicitQuantileAgent(rainbow_agent.RainbowAgent):
         summary_writer=summary_writer,
         summary_writing_frequency=summary_writing_frequency)
 
-  def _create_network(self, name):
+  def _get_network_type(self):
+    """Returns the type of the outputs of the implicit quantile network.
+
+    Returns:
+      _network_type object defining the outputs of the network.
+    """
+    return collections.namedtuple(
+        'iqn_network', ['quantile_values', 'quantiles'])
+
+  def _network_template(self, state, num_quantiles):
     r"""Builds an Implicit Quantile ConvNet.
 
+    Takes state and quantile as inputs and outputs state-action quantile values.
+
     Args:
-      name: str, this name is passed to the tf.keras.Model and used to create
-        variable scope under the hood by the tf.keras.Model.
+      state: A `tf.placeholder` for the RL state.
+      num_quantiles: int, number of quantile inputs.
+
     Returns:
-      network: tf.keras.Model, the network instantiated by the Keras model.
+      _network_type object containing quantile value outputs of the network.
     """
-    network = self.network(self.num_actions, self.quantile_embedding_dim,
-                           name=name)
-    return network
+    return self.network(self.num_actions, self.quantile_embedding_dim,
+                        self._get_network_type(), state, num_quantiles)
 
   def _build_networks(self):
     """Builds the IQN computations needed for acting and training.
@@ -120,8 +135,11 @@ class ImplicitQuantileAgent(rainbow_agent.RainbowAgent):
       self._replay_next_target_net_outputs: The replayed next states' target
         quantile values.
     """
-    self.online_convnet = self._create_network(name='Online')
-    self.target_convnet = self._create_network(name='Target')
+    # Calling online_convnet will generate a new graph as defined in
+    # self._get_network_template using whatever input is passed, but will always
+    # share the same weights.
+    self.online_convnet = tf.make_template('Online', self._network_template)
+    self.target_convnet = tf.make_template('Target', self._network_template)
 
     # Compute the Q-values which are used for action selection in the current
     # state.

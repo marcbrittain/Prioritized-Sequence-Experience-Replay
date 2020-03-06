@@ -4,12 +4,13 @@ import dopamine.discrete_domains.gym_lib
 import dopamine.discrete_domains.run_experiment
 import dopamine.agents.dqn.dqn_agent
 import dopamine.replay_memory.circular_replay_buffer
+import dopamine.replay_memory.prioritized_replay_buffer
 import gin.tf.external_configurables
 
 DQNAgent.observation_shape = %gym_lib.CARTPOLE_OBSERVATION_SHAPE
 DQNAgent.observation_dtype = %gym_lib.CARTPOLE_OBSERVATION_DTYPE
 DQNAgent.stack_size = %gym_lib.CARTPOLE_STACK_SIZE
-DQNAgent.network = @gym_lib.CartpoleDQNNetwork
+DQNAgent.network = @gym_lib.cartpole_dqn_network
 DQNAgent.gamma = 0.99
 DQNAgent.update_horizon = 1
 DQNAgent.min_replay_history = 500
@@ -33,3 +34,13 @@ Runner.max_steps_per_episode = 200  # Default max episode length.
 
 WrappedReplayBuffer.replay_capacity = 50000
 WrappedReplayBuffer.batch_size = 128
+WrappedPrioritizedReplayBuffer.replay_capacity = 50000
+WrappedPrioritizedReplayBuffer.batch_size = 128
+
+
+DQNAgent.replay_scheme = 'uniform'
+WrappedPrioritizedReplayBuffer.decay_scheme = 'max'  ## for baseline set to 'default'
+WrappedPrioritizedReplayBuffer.decay_window   = 20             # 5, 10, 20, 50, 100
+WrappedPrioritizedReplayBuffer.decay_gamma    = .7              # 0.99, 0.95, 0.85, 0.5, 0.3
+WrappedPrioritizedReplayBuffer.decay_schedule = 'none'           # we should try this at least on 1 game
+DQNAgent.eta                              = 0.3

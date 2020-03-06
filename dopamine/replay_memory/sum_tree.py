@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2018 The Dopamine Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -194,6 +193,45 @@ class SumTree(object):
     self.max_recorded_priority = max(value, self.max_recorded_priority)
 
     delta_value = value - self.nodes[-1][node_index]
+
+    # Now traverse back the tree, adjusting all sums along the way.
+    for nodes_at_this_depth in reversed(self.nodes):
+      # Note: Adding a delta leads to some tolerable numerical inaccuracies.
+      nodes_at_this_depth[node_index] += delta_value
+      node_index //= 2
+
+    assert node_index == 0, ('Sum tree traversal failed, final node index '
+                             'is not 0.')
+
+  def increase_priority(self, node_index, value, decay_scheme):
+    """Sets the value of a leaf node and updates internal nodes accordingly.
+
+    This operation takes O(log(capacity)).
+    Args:
+      node_index: int, the index of the leaf node to be updated.
+      value: float, the value which we assign to the node. This value must be
+        nonnegative. Setting value = 0 will cause the element to never be
+        sampled.
+
+    Raises:
+      ValueError: If the given value is negative.
+    """
+    if value < 0.0:
+      raise ValueError('Sum tree values should be nonnegative. Got {}'.
+                       format(value))
+
+
+    old_prio = self.nodes[-1][node_index]
+    if decay_scheme == 'max':
+      value = max(value, old_prio)
+    elif decay_scheme == 'add':
+      value = min(value + old_prio,self.max_recorded_priority)
+    delta_value = value - self.nodes[-1][node_index]
+    if delta_value == 0 or node_index < 0:
+      return
+
+    #print(value)
+    self.max_recorded_priority = max(value, self.max_recorded_priority)
 
     # Now traverse back the tree, adjusting all sums along the way.
     for nodes_at_this_depth in reversed(self.nodes):
