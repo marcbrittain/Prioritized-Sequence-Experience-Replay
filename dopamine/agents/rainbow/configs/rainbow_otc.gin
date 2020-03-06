@@ -34,9 +34,10 @@ Runner.max_steps_per_episode = 27000  # agent steps
 WrappedPrioritizedReplayBuffer.replay_capacity = 1000000
 WrappedPrioritizedReplayBuffer.batch_size = 32
 
-WrappedPrioritizedReplayBuffer.decay_scheme = 'max'  ## for baseline set to 'default'
-WrappedPrioritizedReplayBuffer.decay_window   = 20              # 5, 10, 20, 50, 100
-WrappedPrioritizedReplayBuffer.decay_gamma    = .95              # 0.99, 0.95, 0.85, 0.5, 0.3
-WrappedPrioritizedReplayBuffer.decay_schedule = 'none'           # we should try this at least on 1 game
-RainbowAgent.eta                              = 0.7              ## for no eta set to 'default',
-                                                                 # 0, 0.3, 0.5, 0.8
+WrappedPrioritizedReplayBuffer.decay_scheme =   'max'  ## for PER set to 'default'
+WrappedPrioritizedReplayBuffer.decay_window   =  5
+WrappedPrioritizedReplayBuffer.decay_gamma    =  .4
+WrappedPrioritizedReplayBuffer.decay_schedule = 'none'
+RainbowAgent.eta                              =  0.7
+RainbowAgent.add_w_online                     = False
+WrappedPrioritizedReplayBuffer.adaptive       = False
