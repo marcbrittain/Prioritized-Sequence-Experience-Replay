@@ -43,7 +43,7 @@ WrappedPrioritizedReplayBuffer.decay_window   =  5
 WrappedPrioritizedReplayBuffer.decay_gamma    =  .4
 WrappedPrioritizedReplayBuffer.decay_schedule = 'none'
 RainbowAgent.eta                              =  0.7
-RainbowAgent.add_w_online                     = True
+RainbowAgent.add_w_online                     = False
 WrappedPrioritizedReplayBuffer.adaptive       = False
 
 
