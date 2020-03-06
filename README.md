@@ -9,7 +9,14 @@ python -um dopamine.discrete_domains.train \
   --gin_files='dopamine/agents/dqn/configs/FULL/PSER/dqn_pser_Pong.gin'
 ```
 
-To visualize the results, please use the log_plots python notebook.
+Support is also available for a Rainbow agent. There is a rainbow_pser.gin file that contains a template for set up. 
+
+
+If this work helped in your work or research please cite the work below:
+
+```
+Brittain, M., Bertram, J., Yang, X., & Wei, P. (2019). Prioritized Sequence Experience Replay. arXiv preprint arXiv:1905.12726.
+```
 
 
 
