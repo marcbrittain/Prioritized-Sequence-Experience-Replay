@@ -11,6 +11,20 @@ python -um dopamine.discrete_domains.train \
 
 Support is also available for a Rainbow agent. There is a rainbow_pser.gin file that contains a template for set up. 
 
+## Configurations
+
+In the gin file for pser you will find the following lines of code that you are free to change depending on your application:
+
+```
+WrappedPrioritizedReplayBuffer.decay_scheme =   'max'  ## for PER set to 'default'
+WrappedPrioritizedReplayBuffer.decay_window   =  5
+WrappedPrioritizedReplayBuffer.decay_gamma    =  .4
+WrappedPrioritizedReplayBuffer.decay_schedule = 'none'
+DQNAgent.eta                              = 0.7  ## for PER set to 'default'
+DQNAgent.add_w_online                     = False
+WrappedPrioritizedReplayBuffer.adaptive       = False
+```
+
 
 ## Community Impact
 Publishing research that is meaningful and impactful on the broader community is something I strive for. If you found this work helpful, or have any comments/questions please feel free to email me at mwb AT iastate.edu.
