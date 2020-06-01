@@ -43,7 +43,7 @@ If this work helped in your work or research please cite the [paper](https://arx
 ```
 
 ## To-Do
-* Upload log files of PER and PSER for all Atari games (will complete by 03/13/2020).
+* Upload log files of PER and PSER for all Atari games.
 
 -----
 
