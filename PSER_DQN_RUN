@@ -1,0 +1,16 @@
+#!/bin/bash
+counter=1;
+for name in dopamine/agents/dqn/configs/FULL/PSER/dqn_pser_*.gin;
+do
+  if [ $counter -ge $1 ] && [ $counter -le $2 ]
+  then
+    path_to_gin="'$name'";
+    echo $path_to_gin
+    fp=${name##*/dqn_pser_};
+    game=${fp%.*};
+    echo $game;
+    nohup python -um dopamine.discrete_domains.train --base_dir=~/DQN/FULL/PSER/$game --gin_files=$name &
+
+  fi
+  ((counter++))
+done

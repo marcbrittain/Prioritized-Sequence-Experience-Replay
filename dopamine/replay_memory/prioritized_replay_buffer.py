@@ -28,7 +28,7 @@ from dopamine.replay_memory import circular_replay_buffer
 from dopamine.replay_memory import sum_tree
 from dopamine.replay_memory.circular_replay_buffer import ReplayElement
 import numpy as np
-import tensorflow.compat.v1 as tf
+import tensorflow as tf
 
 import gin.tf
 
@@ -45,12 +45,16 @@ class OutOfGraphPrioritizedReplayBuffer(
                stack_size,
                replay_capacity,
                batch_size,
+               decay_scheme,
+               decay_window,
+               decay_gamma,
+               decay_schedule,
+               adaptive,
                update_horizon=1,
                gamma=0.99,
-               max_sample_attempts=1000,
+               max_sample_attempts=circular_replay_buffer.MAX_SAMPLE_ATTEMPTS,
                extra_storage_types=None,
                observation_dtype=np.uint8,
-               terminal_dtype=np.uint8,
                action_shape=(),
                action_dtype=np.int32,
                reward_shape=(),
@@ -70,8 +74,6 @@ class OutOfGraphPrioritizedReplayBuffer(
         contents that will be stored and returned by sample_transition_batch.
       observation_dtype: np.dtype, type of the observations. Defaults to
         np.uint8 for Atari 2600.
-      terminal_dtype: np.dtype, type of the terminals. Defaults to np.uint8 for
-        Atari 2600.
       action_shape: tuple of ints, the shape for the action vector. Empty tuple
         means the action is a scalar.
       action_dtype: np.dtype, type of elements in the action.
@@ -84,12 +86,16 @@ class OutOfGraphPrioritizedReplayBuffer(
         stack_size=stack_size,
         replay_capacity=replay_capacity,
         batch_size=batch_size,
+        decay_scheme=decay_scheme,
+        decay_window=decay_window,
+        decay_gamma=decay_gamma,
+        decay_schedule=decay_schedule,
+        adaptive=adaptive,
         update_horizon=update_horizon,
         gamma=gamma,
         max_sample_attempts=max_sample_attempts,
         extra_storage_types=extra_storage_types,
         observation_dtype=observation_dtype,
-        terminal_dtype=terminal_dtype,
         action_shape=action_shape,
         action_dtype=action_dtype,
         reward_shape=reward_shape,
@@ -124,20 +130,20 @@ class OutOfGraphPrioritizedReplayBuffer(
     Args:
       *args: All the elements in a transition.
     """
-    self._check_args_length(*args)
-
     # Use Schaul et al.'s (2015) scheme of setting the priority of new elements
     # to the maximum priority so far.
-    # Picks out 'priority' from arguments and adds it to the sum_tree.
-    transition = {}
+    parent_add_args = []
+    # Picks out 'priority' from arguments and passes the other arguments to the
+    # parent method.
     for i, element in enumerate(self.get_add_args_signature()):
       if element.name == 'priority':
         priority = args[i]
       else:
-        transition[element.name] = args[i]
+        parent_add_args.append(args[i])
 
     self.sum_tree.set(self.cursor(), priority)
-    super(OutOfGraphPrioritizedReplayBuffer, self)._add_transition(transition)
+
+    super(OutOfGraphPrioritizedReplayBuffer, self)._add(*parent_add_args)
 
   def sample_index_batch(self, batch_size):
     """Returns a batch of valid indices sampled as in Schaul et al. (2015).
@@ -213,6 +219,22 @@ class OutOfGraphPrioritizedReplayBuffer(
     for index, priority in zip(indices, priorities):
       self.sum_tree.set(index, priority)
 
+      if not self._decay_scheme == 'default':
+
+          if self._adaptive:
+              window = int(np.log(0.01/priority)/np.log(self._decay_gamma))
+              #f = np.array([window])
+              #np.savetxt('txt.txt',f)
+          else:
+              window = self._decay_window
+              #print(window,'did not work')
+          for k in range(1,window+1):
+              if self._store['terminal'][index - k]:
+                  break
+
+              self.sum_tree.increase_priority(index-k,priority*self._decay_gamma,self._decay_scheme)
+              priority*=self._decay_gamma
+
   def get_priority(self, indices):
     """Fetches the priorities correspond to a batch of memory indices.
 
@@ -273,13 +295,16 @@ class WrappedPrioritizedReplayBuffer(
                use_staging=True,
                replay_capacity=1000000,
                batch_size=32,
+               decay_scheme='max',
+               decay_window=20,
+               decay_gamma=0.8,
+               decay_schedule='none',
+               adaptive=False,
                update_horizon=1,
                gamma=0.99,
-               wrapped_memory=None,
-               max_sample_attempts=1000,
+               max_sample_attempts=circular_replay_buffer.MAX_SAMPLE_ATTEMPTS,
                extra_storage_types=None,
                observation_dtype=np.uint8,
-               terminal_dtype=np.uint8,
                action_shape=(),
                action_dtype=np.int32,
                reward_shape=(),
@@ -295,16 +320,12 @@ class WrappedPrioritizedReplayBuffer(
       batch_size: int.
       update_horizon: int, length of update ('n' in n-step update).
       gamma: int, the discount factor.
-      wrapped_memory: The 'inner' memory data structure. If None, use the
-        default prioritized replay.
       max_sample_attempts: int, the maximum number of attempts allowed to
         get a sample.
       extra_storage_types: list of ReplayElements defining the type of the extra
         contents that will be stored and returned by sample_transition_batch.
       observation_dtype: np.dtype, type of the observations. Defaults to
         np.uint8 for Atari 2600.
-      terminal_dtype: np.dtype, type of the terminals. Defaults to np.uint8 for
-        Atari 2600.
       action_shape: tuple of ints, the shape for the action vector. Empty tuple
         means the action is a scalar.
       action_dtype: np.dtype, type of elements in the action.
@@ -316,25 +337,27 @@ class WrappedPrioritizedReplayBuffer(
       ValueError: If update_horizon is not positive.
       ValueError: If discount factor is not in [0, 1].
     """
-    if wrapped_memory is None:
-      wrapped_memory = OutOfGraphPrioritizedReplayBuffer(
-          observation_shape, stack_size, replay_capacity, batch_size,
-          update_horizon, gamma, max_sample_attempts,
-          extra_storage_types=extra_storage_types,
-          observation_dtype=observation_dtype)
-
+    memory = OutOfGraphPrioritizedReplayBuffer(
+        observation_shape, stack_size, replay_capacity, batch_size, decay_scheme,decay_window,decay_gamma,decay_schedule,adaptive,
+        update_horizon, gamma, max_sample_attempts,
+        extra_storage_types=extra_storage_types,
+        observation_dtype=observation_dtype)
     super(WrappedPrioritizedReplayBuffer, self).__init__(
         observation_shape,
         stack_size,
         use_staging,
         replay_capacity,
         batch_size,
+        decay_scheme,
+        decay_window,
+        decay_gamma,
+        decay_schedule,
+        adaptive,
         update_horizon,
         gamma,
-        wrapped_memory=wrapped_memory,
+        wrapped_memory=memory,
         extra_storage_types=extra_storage_types,
         observation_dtype=observation_dtype,
-        terminal_dtype=terminal_dtype,
         action_shape=action_shape,
         action_dtype=action_dtype,
         reward_shape=reward_shape,

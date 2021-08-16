@@ -19,51 +19,30 @@ is in charge of:
   . Emitting a terminal signal when losing a life (optional).
   . Frame skipping and color pooling.
   . Resizing the image before it is provided to the agent.
-
-## Networks
-We are subclassing keras.models.Model in our network definitions. Each network
-class has two main functions: `.__init__` and `.call`. When we create our
-network the `__init__` function is called and necessary layers are defined. Once
-we create our network, we can create the output operations by doing `call`s to
-our network with different inputs. At each call, the same parameters will be
-used.
-
-More information about keras.Model API can be found here:
-https://www.tensorflow.org/api_docs/python/tf/keras/models/Model
-
-## Network Types
-Network types are namedtuples that define the output signature of the networks
-used. Please use the appropriate signature as needed when defining new networks.
 """
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import collections
 import math
 
 
-import gin
+import atari_py
 import gym
 from gym.spaces.box import Box
 import numpy as np
-import tensorflow.compat.v1 as tf
+import tensorflow as tf
 
+import gin.tf
 import cv2
-from tensorflow.contrib import layers as contrib_layers
-from tensorflow.contrib import slim as contrib_slim
+
+slim = tf.contrib.slim
 
 
 NATURE_DQN_OBSERVATION_SHAPE = (84, 84)  # Size of downscaled Atari 2600 frame.
 NATURE_DQN_DTYPE = tf.uint8  # DType of Atari 2600 observations.
 NATURE_DQN_STACK_SIZE = 4  # Number of frames in the state stack.
-
-DQNNetworkType = collections.namedtuple('dqn_network', ['q_values'])
-RainbowNetworkType = collections.namedtuple(
-    'c51_network', ['q_values', 'logits', 'probabilities'])
-ImplicitQuantileNetworkType = collections.namedtuple(
-    'iqn_network', ['quantile_values', 'quantiles'])
 
 
 
@@ -118,12 +97,12 @@ def nature_dqn_network(num_actions, network_type, state):
   """
   net = tf.cast(state, tf.float32)
   net = tf.div(net, 255.)
-  net = contrib_slim.conv2d(net, 32, [8, 8], stride=4)
-  net = contrib_slim.conv2d(net, 64, [4, 4], stride=2)
-  net = contrib_slim.conv2d(net, 64, [3, 3], stride=1)
-  net = contrib_slim.flatten(net)
-  net = contrib_slim.fully_connected(net, 512)
-  q_values = contrib_slim.fully_connected(net, num_actions, activation_fn=None)
+  net = slim.conv2d(net, 32, [8, 8], stride=4)
+  net = slim.conv2d(net, 64, [4, 4], stride=2)
+  net = slim.conv2d(net, 64, [3, 3], stride=1)
+  net = slim.flatten(net)
+  net = slim.fully_connected(net, 512)
+  q_values = slim.fully_connected(net, num_actions, activation_fn=None)
   return network_type(q_values)
 
 
@@ -140,28 +119,28 @@ def rainbow_network(num_actions, num_atoms, support, network_type, state):
   Returns:
     net: _network_type object containing the tensors output by the network.
   """
-  weights_initializer = contrib_slim.variance_scaling_initializer(
+  weights_initializer = slim.variance_scaling_initializer(
       factor=1.0 / np.sqrt(3.0), mode='FAN_IN', uniform=True)
 
   net = tf.cast(state, tf.float32)
   net = tf.div(net, 255.)
-  net = contrib_slim.conv2d(
+  net = slim.conv2d(
       net, 32, [8, 8], stride=4, weights_initializer=weights_initializer)
-  net = contrib_slim.conv2d(
+  net = slim.conv2d(
       net, 64, [4, 4], stride=2, weights_initializer=weights_initializer)
-  net = contrib_slim.conv2d(
+  net = slim.conv2d(
       net, 64, [3, 3], stride=1, weights_initializer=weights_initializer)
-  net = contrib_slim.flatten(net)
-  net = contrib_slim.fully_connected(
+  net = slim.flatten(net)
+  net = slim.fully_connected(
       net, 512, weights_initializer=weights_initializer)
-  net = contrib_slim.fully_connected(
+  net = slim.fully_connected(
       net,
       num_actions * num_atoms,
       activation_fn=None,
       weights_initializer=weights_initializer)
 
   logits = tf.reshape(net, [-1, num_actions, num_atoms])
-  probabilities = contrib_layers.softmax(logits)
+  probabilities = tf.contrib.layers.softmax(logits)
   q_values = tf.reduce_sum(support * probabilities, axis=2)
   return network_type(q_values, logits, probabilities)
 
@@ -180,18 +159,21 @@ def implicit_quantile_network(num_actions, quantile_embedding_dim,
   Returns:
     net: _network_type object containing the tensors output by the network.
   """
-  weights_initializer = contrib_slim.variance_scaling_initializer(
+  weights_initializer = slim.variance_scaling_initializer(
       factor=1.0 / np.sqrt(3.0), mode='FAN_IN', uniform=True)
 
   state_net = tf.cast(state, tf.float32)
   state_net = tf.div(state_net, 255.)
-  state_net = contrib_slim.conv2d(
-      state_net, 32, [8, 8], stride=4, weights_initializer=weights_initializer)
-  state_net = contrib_slim.conv2d(
-      state_net, 64, [4, 4], stride=2, weights_initializer=weights_initializer)
-  state_net = contrib_slim.conv2d(
-      state_net, 64, [3, 3], stride=1, weights_initializer=weights_initializer)
-  state_net = contrib_slim.flatten(state_net)
+  state_net = slim.conv2d(
+      state_net, 32, [8, 8], stride=4,
+      weights_initializer=weights_initializer)
+  state_net = slim.conv2d(
+      state_net, 64, [4, 4], stride=2,
+      weights_initializer=weights_initializer)
+  state_net = slim.conv2d(
+      state_net, 64, [3, 3], stride=1,
+      weights_initializer=weights_initializer)
+  state_net = slim.flatten(state_net)
   state_net_size = state_net.get_shape().as_list()[-1]
   state_net_tiled = tf.tile(state_net, [num_quantiles, 1])
 
@@ -205,243 +187,20 @@ def implicit_quantile_network(num_actions, quantile_embedding_dim,
   quantile_net = tf.cast(tf.range(
       1, quantile_embedding_dim + 1, 1), tf.float32) * pi * quantile_net
   quantile_net = tf.cos(quantile_net)
-  quantile_net = contrib_slim.fully_connected(
-      quantile_net, state_net_size, weights_initializer=weights_initializer)
+  quantile_net = slim.fully_connected(quantile_net, state_net_size,
+                                      weights_initializer=weights_initializer)
   # Hadamard product.
   net = tf.multiply(state_net_tiled, quantile_net)
 
-  net = contrib_slim.fully_connected(
+  net = slim.fully_connected(
       net, 512, weights_initializer=weights_initializer)
-  quantile_values = contrib_slim.fully_connected(
+  quantile_values = slim.fully_connected(
       net,
       num_actions,
       activation_fn=None,
       weights_initializer=weights_initializer)
 
   return network_type(quantile_values=quantile_values, quantiles=quantiles)
-
-
-@gin.configurable(blacklist=['variables'])
-def maybe_transform_variable_names(variables, legacy_checkpoint_load=False):
-  """Maps old variable names to the new ones.
-
-  The resulting dictionary can be passed to the tf.train.Saver to load
-  legacy checkpoints into Keras models.
-
-  Args:
-    variables: list, of all variables to be transformed.
-    legacy_checkpoint_load: bool, if True the variable names are mapped to
-        the legacy names as appeared in `tf.slim` based agents. Use this if
-        you want to load checkpoints saved before tf.keras.Model upgrade.
-  Returns:
-    dict or None, of <new_names, var>.
-  """
-  tf.logging.info('legacy_checkpoint_load: %s', legacy_checkpoint_load)
-  if legacy_checkpoint_load:
-    name_map = {}
-    for var in variables:
-      new_name = var.op.name.replace('bias', 'biases')
-      new_name = new_name.replace('kernel', 'weights')
-      name_map[new_name] = var
-  else:
-    name_map = None
-  return name_map
-
-
-class NatureDQNNetwork(tf.keras.Model):
-  """The convolutional network used to compute the agent's Q-values."""
-
-  def __init__(self, num_actions, name=None):
-    """Creates the layers used for calculating Q-values.
-
-    Args:
-      num_actions: int, number of actions.
-      name: str, used to create scope for network parameters.
-    """
-    super(NatureDQNNetwork, self).__init__(name=name)
-
-    self.num_actions = num_actions
-    # Defining layers.
-    activation_fn = tf.keras.activations.relu
-    # Setting names of the layers manually to make variable names more similar
-    # with tf.slim variable names/checkpoints.
-    self.conv1 = tf.keras.layers.Conv2D(32, [8, 8], strides=4, padding='same',
-                                        activation=activation_fn, name='Conv')
-    self.conv2 = tf.keras.layers.Conv2D(64, [4, 4], strides=2, padding='same',
-                                        activation=activation_fn, name='Conv')
-    self.conv3 = tf.keras.layers.Conv2D(64, [3, 3], strides=1, padding='same',
-                                        activation=activation_fn, name='Conv')
-    self.flatten = tf.keras.layers.Flatten()
-    self.dense1 = tf.keras.layers.Dense(512, activation=activation_fn,
-                                        name='fully_connected')
-    self.dense2 = tf.keras.layers.Dense(num_actions, name='fully_connected')
-
-  def call(self, state):
-    """Creates the output tensor/op given the state tensor as input.
-
-    See https://www.tensorflow.org/api_docs/python/tf/keras/Model for more
-    information on this. Note that tf.keras.Model implements `call` which is
-    wrapped by `__call__` function by tf.keras.Model.
-
-    Parameters created here will have scope according to the `name` argument
-    given at `.__init__()` call.
-    Args:
-      state: Tensor, input tensor.
-    Returns:
-      collections.namedtuple, output ops (graph mode) or output tensors (eager).
-    """
-    x = tf.cast(state, tf.float32)
-    x = tf.div(x, 255.)
-    x = self.conv1(x)
-    x = self.conv2(x)
-    x = self.conv3(x)
-    x = self.flatten(x)
-    x = self.dense1(x)
-
-    return DQNNetworkType(self.dense2(x))
-
-
-class RainbowNetwork(tf.keras.Model):
-  """The convolutional network used to compute agent's return distributions."""
-
-  def __init__(self, num_actions, num_atoms, support, name=None):
-    """Creates the layers used calculating return distributions.
-
-    Args:
-      num_actions: int, number of actions.
-      num_atoms: int, the number of buckets of the value function distribution.
-      support: tf.linspace, the support of the Q-value distribution.
-      name: str, used to crete scope for network parameters.
-    """
-    super(RainbowNetwork, self).__init__(name=name)
-    activation_fn = tf.keras.activations.relu
-    self.num_actions = num_actions
-    self.num_atoms = num_atoms
-    self.support = support
-    self.kernel_initializer = tf.keras.initializers.VarianceScaling(
-        scale=1.0 / np.sqrt(3.0), mode='fan_in', distribution='uniform')
-    # Defining layers.
-    self.conv1 = tf.keras.layers.Conv2D(
-        32, [8, 8], strides=4, padding='same', activation=activation_fn,
-        kernel_initializer=self.kernel_initializer, name='Conv')
-    self.conv2 = tf.keras.layers.Conv2D(
-        64, [4, 4], strides=2, padding='same', activation=activation_fn,
-        kernel_initializer=self.kernel_initializer, name='Conv')
-    self.conv3 = tf.keras.layers.Conv2D(
-        64, [3, 3], strides=1, padding='same', activation=activation_fn,
-        kernel_initializer=self.kernel_initializer, name='Conv')
-    self.flatten = tf.keras.layers.Flatten()
-    self.dense1 = tf.keras.layers.Dense(
-        512, activation=activation_fn,
-        kernel_initializer=self.kernel_initializer, name='fully_connected')
-    self.dense2 = tf.keras.layers.Dense(
-        num_actions * num_atoms, kernel_initializer=self.kernel_initializer,
-        name='fully_connected')
-
-  def call(self, state):
-    """Creates the output tensor/op given the state tensor as input.
-
-    See https://www.tensorflow.org/api_docs/python/tf/keras/Model for more
-    information on this. Note that tf.keras.Model implements `call` which is
-    wrapped by `__call__` function by tf.keras.Model.
-
-    Args:
-      state: Tensor, input tensor.
-    Returns:
-      collections.namedtuple, output ops (graph mode) or output tensors (eager).
-    """
-    x = tf.cast(state, tf.float32)
-    x = tf.div(x, 255.)
-    x = self.conv1(x)
-    x = self.conv2(x)
-    x = self.conv3(x)
-    x = self.flatten(x)
-    x = self.dense1(x)
-    x = self.dense2(x)
-    logits = tf.reshape(x, [-1, self.num_actions, self.num_atoms])
-    probabilities = tf.keras.activations.softmax(logits)
-    q_values = tf.reduce_sum(self.support * probabilities, axis=2)
-    return RainbowNetworkType(q_values, logits, probabilities)
-
-
-class ImplicitQuantileNetwork(tf.keras.Model):
-  """The Implicit Quantile Network (Dabney et al., 2018).."""
-
-  def __init__(self, num_actions, quantile_embedding_dim, name=None):
-    """Creates the layers used calculating quantile values.
-
-    Args:
-      num_actions: int, number of actions.
-      quantile_embedding_dim: int, embedding dimension for the quantile input.
-      name: str, used to create scope for network parameters.
-    """
-    super(ImplicitQuantileNetwork, self).__init__(name=name)
-    self.num_actions = num_actions
-    self.quantile_embedding_dim = quantile_embedding_dim
-    # We need the activation function during `call`, therefore set the field.
-    self.activation_fn = tf.keras.activations.relu
-    self.kernel_initializer = tf.keras.initializers.VarianceScaling(
-        scale=1.0 / np.sqrt(3.0), mode='fan_in', distribution='uniform')
-    # Defining layers.
-    self.conv1 = tf.keras.layers.Conv2D(
-        32, [8, 8], strides=4, padding='same', activation=self.activation_fn,
-        kernel_initializer=self.kernel_initializer, name='Conv')
-    self.conv2 = tf.keras.layers.Conv2D(
-        64, [4, 4], strides=2, padding='same', activation=self.activation_fn,
-        kernel_initializer=self.kernel_initializer, name='Conv')
-    self.conv3 = tf.keras.layers.Conv2D(
-        64, [3, 3], strides=1, padding='same', activation=self.activation_fn,
-        kernel_initializer=self.kernel_initializer, name='Conv')
-    self.flatten = tf.keras.layers.Flatten()
-    self.dense1 = tf.keras.layers.Dense(
-        512, activation=self.activation_fn,
-        kernel_initializer=self.kernel_initializer, name='fully_connected')
-    self.dense2 = tf.keras.layers.Dense(
-        num_actions, kernel_initializer=self.kernel_initializer,
-        name='fully_connected')
-
-  def call(self, state, num_quantiles):
-    """Creates the output tensor/op given the state tensor as input.
-
-    See https://www.tensorflow.org/api_docs/python/tf/keras/Model for more
-    information on this. Note that tf.keras.Model implements `call` which is
-    wrapped by `__call__` function by tf.keras.Model.
-
-    Args:
-      state: `tf.Tensor`, contains the agent's current state.
-      num_quantiles: int, number of quantile inputs.
-    Returns:
-      collections.namedtuple, that contains (quantile_values, quantiles).
-    """
-    batch_size = state.get_shape().as_list()[0]
-    x = tf.cast(state, tf.float32)
-    x = tf.div(x, 255.)
-    x = self.conv1(x)
-    x = self.conv2(x)
-    x = self.conv3(x)
-    x = self.flatten(x)
-    state_vector_length = x.get_shape().as_list()[-1]
-    state_net_tiled = tf.tile(x, [num_quantiles, 1])
-    quantiles_shape = [num_quantiles * batch_size, 1]
-    quantiles = tf.random_uniform(
-        quantiles_shape, minval=0, maxval=1, dtype=tf.float32)
-    quantile_net = tf.tile(quantiles, [1, self.quantile_embedding_dim])
-    pi = tf.constant(math.pi)
-    quantile_net = tf.cast(tf.range(
-        1, self.quantile_embedding_dim + 1, 1), tf.float32) * pi * quantile_net
-    quantile_net = tf.cos(quantile_net)
-    # Create the quantile layer in the first call. This is because
-    # number of output units depends on the input shape. Therefore, we can only
-    # create the layer during the first forward call, not during `.__init__()`.
-    if not hasattr(self, 'dense_quantile'):
-      self.dense_quantile = tf.keras.layers.Dense(
-          state_vector_length, activation=self.activation_fn,
-          kernel_initializer=self.kernel_initializer)
-    quantile_net = self.dense_quantile(quantile_net)
-    x = tf.multiply(state_net_tiled, quantile_net)
-    x = self.dense1(x)
-    quantile_values = self.dense2(x)
-    return ImplicitQuantileNetworkType(quantile_values, quantiles)
 
 
 @gin.configurable
@@ -516,9 +275,6 @@ class AtariPreprocessing(object):
   @property
   def metadata(self):
     return self.environment.metadata
-
-  def close(self):
-    return self.environment.close()
 
   def reset(self):
     """Resets the environment.
